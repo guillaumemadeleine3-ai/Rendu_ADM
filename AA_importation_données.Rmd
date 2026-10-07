@@ -1,0 +1,31 @@
+---
+title: "R Notebook"
+output: github_document
+---
+## ls (list show) : savoir ce qu'on a dans le fichier 
+## wc = word count 
+## on est allé sur l'ena on a téléchargé les séquences, qu'on a mises dans notre dossier Data avec (ls ; source ena (tab) etn entrée)
+## ensuite run selector avec PRJEB65896 de l'article et on télécharge la table de métadonnée et on l'ouvre dans une variable avec read.csv
+
+```{r}
+meta_data_table <- read.csv("SraRunTable.csv", sep = ",", header = TRUE)
+  # importation de la table de métadonnée 
+```
+
+```{r}
+library(dada2); packageVersion("dada2")
+```
+
+```{r}
+path <- "/home/rstudio/ADM_Données_articles/Data_article" # CHANGE ME to the directory containing the fastq files after unzipping.
+list.files(path)
+```
+
+```{r}
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_1.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_2.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+
