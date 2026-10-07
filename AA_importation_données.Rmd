@@ -6,6 +6,7 @@ output: github_document
 ## wc = word count 
 ## on est allé sur l'ena on a téléchargé les séquences, qu'on a mises dans notre dossier Data avec (ls ; source ena (tab) etn entrée)
 ## ensuite run selector avec PRJEB65896 de l'article et on télécharge la table de métadonnée et on l'ouvre dans une variable avec read.csv
+# mettre commentaires dans commit, en dehors des chunks!!!!!!!!!!
 
 ```{r}
 meta_data_table <- read.csv("SraRunTable.csv", sep = ",", header = TRUE)
@@ -33,4 +34,21 @@ sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
 plotQualityProfile(fnFs[1:2])
 #visualiser les profils de qualité des lectures
 ```
+```{r}
+plotQualityProfile(fnRs[1:2])
+#visualiser les profils de qualité des lectures inversées
+```
+```{r}
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
 
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE) 
+head(out)
+```
