@@ -29,3 +29,8 @@ fnRs <- sort(list.files(path, pattern="_2.fastq", full.names = TRUE))
 sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
 ```
 
+```{r}
+plotQualityProfile(fnFs[1:2])
+#visualiser les profils de qualité des lectures
+```
+
