@@ -51,4 +51,6 @@ out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
               maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
               compress=TRUE, multithread=FALSE) 
 head(out)
+##Le séquençage des régions V3-V4 du gène rRNA 16S a été effectué à l'aide des amorces universelles 341F 5' CCTACGGGNGGC WGCAG 3' et 785R 5' GAC TAC HVG GGT ATC TAA TCC 3' pour les échantillons de coraux, de sédiments et d'eau,
+# somme read 1 read 2 pas moins de 420 + 20 ... 
 ```
