@@ -54,4 +54,5 @@ head(out)
 ##Le séquençage des régions V3-V4 du gène rRNA 16S a été effectué à l'aide des amorces universelles 341F 5' CCTACGGGNGGC WGCAG 3' et 785R 5' GAC TAC HVG GGT ATC TAA TCC 3' pour les échantillons de coraux, de sédiments et d'eau,
 # somme read 1 read 2 pas moins de 444 + 20 ... 
 ```
-
+## modification du fichier sh + application de la commande : sed -i 's|ftp://|https://|g; s|wget -nc|wget -c --tries=10 --retry-connrefused --waitretry=5|g' download.sh
+## Ensuite commmande : source ena (tab).sh (DANS TERMINAL!)
