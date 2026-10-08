@@ -18,7 +18,7 @@ library(dada2); packageVersion("dada2")
 ```
 
 ```{r}
-path <- "/home/rstudio/ADM_Données_articles/Data_article" # CHANGE ME to the directory containing the fastq files after unzipping.
+path <- "/home/rstudio/ADM_Données_articles/data_article" # CHANGE ME to the directory containing the fastq files after unzipping.
 list.files(path)
 ```
 
