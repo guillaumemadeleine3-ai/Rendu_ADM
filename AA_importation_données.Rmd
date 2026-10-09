@@ -80,4 +80,12 @@ mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
 # Inspect the merger data.frame from the first sample
 head(mergers[[1]])
 ```
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+```{r}
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
 
