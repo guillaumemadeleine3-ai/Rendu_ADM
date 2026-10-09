@@ -7,6 +7,7 @@ output: github_document
 ## on est allé sur l'ena on a téléchargé les séquences, qu'on a mises dans notre dossier Data avec (ls ; source ena (tab) etn entrée)
 ## ensuite run selector avec PRJEB65896 de l'article et on télécharge la table de métadonnée et on l'ouvre dans une variable avec read.csv
 # mettre commentaires dans commit, en dehors des chunks!!!!!!!!!!
+## Token : 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
 
 ```{r}
 meta_data_table <- read.csv("SraRunTable.csv", sep = ",", header = TRUE)
@@ -87,5 +88,12 @@ dim(seqtab)
 ```{r}
 # Inspect distribution of sequence lengths
 table(nchar(getSequences(seqtab)))
+```
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
 ```
 
