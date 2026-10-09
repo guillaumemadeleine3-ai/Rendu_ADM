@@ -136,75 +136,116 @@ theme_set(theme_bw())
 ```
 
 ```{r}
-# 1. Repérer la colonne de meta_data_table qui contient les identifiants ERR
-id_col <- names(which.max(sapply(meta_data_table,
-                                 function(x) sum(rownames(seqtab.nochim) %in% x))))
-id_col
+library(dada2); library(phyloseq); library(decontam)
+library(vegan); library(ggplot2); library(Biostrings)
 
-# 2. Garder seulement les échantillons présents dans seqtab.nochim, dans le même ordre
+silva <- "/home/rstudio/ADM_Données_articles/silva_nr99_v138.1_train_set.fa.gz"
+
+## 1. Métadonnées alignées sur seqtab.nochim
+id_col <- names(which.max(sapply(meta_data_table,
+                function(x) sum(rownames(seqtab.nochim) %in% x))))
 samdf <- as.data.frame(meta_data_table)
 samdf <- samdf[samdf[[id_col]] %in% rownames(seqtab.nochim), ]
 rownames(samdf) <- samdf[[id_col]]
 samdf <- samdf[rownames(seqtab.nochim), , drop = FALSE]
+stopifnot(all(rownames(samdf) == rownames(seqtab.nochim)))
 
-# 3. Vérification : doit afficher TRUE
-all(rownames(samdf) == rownames(seqtab.nochim))
+# Traitement : BMC = probiotique, CTRL = placebo
+samdf$Treatment <- ifelse(grepl("BMC", samdf$Sample_name), "Probiotic",
+                   ifelse(grepl("CTRL", samdf$Sample_name), "Placebo", NA))
+samdf$is.neg <- samdf$Organism == "blank sample"
 ```
+
 ```{r}
-library(phyloseq)
-ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
-               sample_data(samdf),
-               tax_table(taxa))
-ps
+## 2. Correction des ASV en sens inverse (hypothèse à vérifier ci-dessous)
+taxa.rc <- assignTaxonomy(seqtab.nochim, silva, multithread = TRUE, tryRC = TRUE)
+is_rc   <- is.na(taxa[, "Phylum"]) & !is.na(taxa.rc[, "Phylum"])
+cat("ASV reclassées après retournement :", sum(is_rc), "\n")
+cat("Part des lectures concernées :",
+    round(100 * sum(seqtab.nochim[, is_rc]) / sum(seqtab.nochim), 1), "%\n")
+
+seqtab.fix <- seqtab.nochim
+colnames(seqtab.fix)[is_rc] <- dada2::rc(colnames(seqtab.fix)[is_rc])
+seqtab.fix <- t(rowsum(t(seqtab.fix), group = colnames(seqtab.fix)))   # fusionne les doublons
+taxa.fix   <- assignTaxonomy(seqtab.fix, silva, multithread = TRUE, tryRC = TRUE)
+round(100 * colMeans(is.na(taxa.fix)), 1)    # % de NA par rang
 ```
-##Retirer les chloroplastes et mitochondries, fréquents chez les coraux et qui ne sont pas de vraies bactéries du microbiome :
+
 ```{r}
-ps <- subset_taxa(ps, is.na(Order) | Order != "Chloroplast")
+## 3. Objet phyloseq et nettoyage
+ps <- phyloseq(otu_table(seqtab.fix, taxa_are_rows = FALSE),
+               sample_data(samdf), tax_table(taxa.fix))
+
+ps <- subset_taxa(ps, is.na(Order)  | Order  != "Chloroplast")
 ps <- subset_taxa(ps, is.na(Family) | Family != "Mitochondria")
-ps
-```
 
-##Renommer les ASV (comme dans le tuto) pour avoir des noms courts au lieu des séquences complètes :
-```{r}
-dna <- Biostrings::DNAStringSet(taxa_names(ps))
-names(dna) <- taxa_names(ps)
-ps <- merge_phyloseq(ps, dna)
+dna <- DNAStringSet(taxa_names(ps)); names(dna) <- taxa_names(ps)
+ps  <- merge_phyloseq(ps, dna)
 taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
-ps
-```
-##Regarder tes variables, pour choisir celles à utiliser dans les graphiques :
-```{r}
-colnames(sample_data(ps))
-```
-```{r}
-sd <- data.frame(sample_data(ps))
 
-table(sd$Sampling_time)
-table(sd$Organism)
-table(sd$environment)
-head(sd$Sample_name, 20)
-
-##blank sample : 7 échantillons, les B1NegT1, B2NegT2, etc. Ce sont des blancs (extraction ou PCR sans échantillon). Les autres échantillons sont 114 coraux, 19 eaux et 16 sédiments.
-
-##Les noms comme BMC10T1 se lisent « colonie 10, temps T1 ». BMC désigne probablement les coraux traités avec le probiotique (BMC = beneficial microorganisms for corals), mais c’est à confirmer.
-
-##Les blancs servent à repérer les contaminants (bactéries du réactif ou de la manipulation, présentes même sans échantillon). Le package decontam fait ça automatiquement.
-```
-```{r}
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install("decontam")
-```
-```{r}
-library(decontam)
-```
-
-```{r}
-sample_data(ps)$is.neg <- sample_data(ps)$Organism == "blank sample"
+# Contaminants (blancs négatifs), puis retrait des blancs
 contamdf <- isContaminant(ps, method = "prevalence", neg = "is.neg")
 table(contamdf$contaminant)
-
 ps <- prune_taxa(!contamdf$contaminant, ps)
 ps <- subset_samples(ps, Organism != "blank sample")
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
 ps
+table(sample_data(ps)$Organism, sample_data(ps)$Treatment, useNA = "ifany")
+```
+
+```{r}
+## 4. Objets pour les analyses
+ps.coral.raw <- subset_samples(ps, Organism == "coral metagenome")      # comptages bruts
+ps.filt <- filter_taxa(ps, function(x) sum(x > 0) >= 3, TRUE)           # ASV vues dans ≥ 3 échantillons
+ps.prop <- transform_sample_counts(ps.filt, function(x) x / sum(x))
+ps.coral <- subset_samples(ps.prop, Organism == "coral metagenome")
+ps.T3    <- subset_samples(ps.coral, Sampling_time == "T3")
+```
+
+```{r}
+## 5. Diversité alpha (comptages bruts)
+plot_richness(ps, x = "Sampling_time", measures = c("Shannon", "Simpson"), color = "Organism")
+plot_richness(ps.coral.raw, x = "Sampling_time", measures = "Shannon", color = "Treatment")
+
+alpha <- estimate_richness(ps.coral.raw, measures = "Shannon")
+alpha$Treatment     <- sample_data(ps.coral.raw)$Treatment
+alpha$Sampling_time <- sample_data(ps.coral.raw)$Sampling_time
+for (t in c("T1", "T2", "T3", "T4")) {
+  a <- subset(alpha, Sampling_time == t)
+  cat(t, ": p =", signif(wilcox.test(Shannon ~ Treatment, data = a)$p.value, 3), "\n")
+}
+
+```
+
+```{r}
+## 6. Diversité bêta (PCoA de Bray-Curtis)
+ord.all <- ordinate(ps.prop, method = "PCoA", distance = "bray")
+plot_ordination(ps.prop, ord.all, color = "Organism", shape = "Sampling_time")
+
+ord.coral <- ordinate(ps.coral, method = "PCoA", distance = "bray")
+plot_ordination(ps.coral, ord.coral, color = "Treatment", shape = "Sampling_time")
+
+# PERMANOVA à T3 : Bray-Curtis et Jaccard
+adonis2(phyloseq::distance(ps.T3, "bray") ~ Treatment, data = data.frame(sample_data(ps.T3)))
+adonis2(phyloseq::distance(ps.T3, "jaccard", binary = TRUE) ~ Treatment,
+        data = data.frame(sample_data(ps.T3)))
+```
+
+```{r}
+## 7. Endozoicomonadaceae et composition
+tax  <- as(tax_table(ps.coral), "matrix")
+endo <- rownames(tax)[tax[, "Family"] %in% "Endozoicomonadaceae"]
+sample_data(ps.coral)$Endozoicomonadaceae <- sample_sums(prune_taxa(endo, ps.coral))
+sdc <- data.frame(sample_data(ps.coral))
+
+ggplot(sdc, aes(Sampling_time, Endozoicomonadaceae, fill = Treatment)) + geom_boxplot()
+for (t in c("T1", "T2", "T3", "T4")) {
+  a <- subset(sdc, Sampling_time == t)
+  cat(t, ": p =", signif(wilcox.test(Endozoicomonadaceae ~ Treatment, data = a)$p.value, 3), "\n")
+}
+
+top20 <- names(sort(taxa_sums(ps.coral), decreasing = TRUE))[1:20]
+plot_bar(prune_taxa(top20, ps.coral), x = "Sampling_time", fill = "Family") +
+  facet_wrap(~Treatment, scales = "free_x")
 ```
 
