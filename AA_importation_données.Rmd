@@ -104,4 +104,9 @@ rownames(track) <- sample.names
 head(track)
 #suivis de lecture à travers le pipeline
 ```
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim,
+                       "/home/rstudio/ADM_Données_articles/silva_nr99_v138.1_train_set.fa.gz",
+                       multithread = TRUE)
+```
 
