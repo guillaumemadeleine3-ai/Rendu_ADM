@@ -122,4 +122,89 @@ rownames(seqtab.nochim)
 ```{r}
 summary(round(100 * track[, "nonchim"] / track[, "input"], 1))
 ```
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+```
+```{r}
+library(Biostrings); packageVersion("Biostrings")
+```
+```{r}
+library(ggplot2); packageVersion("ggplot2")
+```
+```{r}
+theme_set(theme_bw())
+```
+
+```{r}
+# 1. Repérer la colonne de meta_data_table qui contient les identifiants ERR
+id_col <- names(which.max(sapply(meta_data_table,
+                                 function(x) sum(rownames(seqtab.nochim) %in% x))))
+id_col
+
+# 2. Garder seulement les échantillons présents dans seqtab.nochim, dans le même ordre
+samdf <- as.data.frame(meta_data_table)
+samdf <- samdf[samdf[[id_col]] %in% rownames(seqtab.nochim), ]
+rownames(samdf) <- samdf[[id_col]]
+samdf <- samdf[rownames(seqtab.nochim), , drop = FALSE]
+
+# 3. Vérification : doit afficher TRUE
+all(rownames(samdf) == rownames(seqtab.nochim))
+```
+```{r}
+library(phyloseq)
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+               sample_data(samdf),
+               tax_table(taxa))
+ps
+```
+##Retirer les chloroplastes et mitochondries, fréquents chez les coraux et qui ne sont pas de vraies bactéries du microbiome :
+```{r}
+ps <- subset_taxa(ps, is.na(Order) | Order != "Chloroplast")
+ps <- subset_taxa(ps, is.na(Family) | Family != "Mitochondria")
+ps
+```
+
+##Renommer les ASV (comme dans le tuto) pour avoir des noms courts au lieu des séquences complètes :
+```{r}
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+```
+##Regarder tes variables, pour choisir celles à utiliser dans les graphiques :
+```{r}
+colnames(sample_data(ps))
+```
+```{r}
+sd <- data.frame(sample_data(ps))
+
+table(sd$Sampling_time)
+table(sd$Organism)
+table(sd$environment)
+head(sd$Sample_name, 20)
+
+##blank sample : 7 échantillons, les B1NegT1, B2NegT2, etc. Ce sont des blancs (extraction ou PCR sans échantillon). Les autres échantillons sont 114 coraux, 19 eaux et 16 sédiments.
+
+##Les noms comme BMC10T1 se lisent « colonie 10, temps T1 ». BMC désigne probablement les coraux traités avec le probiotique (BMC = beneficial microorganisms for corals), mais c’est à confirmer.
+
+##Les blancs servent à repérer les contaminants (bactéries du réactif ou de la manipulation, présentes même sans échantillon). Le package decontam fait ça automatiquement.
+```
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install("decontam")
+```
+```{r}
+library(decontam)
+```
+
+```{r}
+sample_data(ps)$is.neg <- sample_data(ps)$Organism == "blank sample"
+contamdf <- isContaminant(ps, method = "prevalence", neg = "is.neg")
+table(contamdf$contaminant)
+
+ps <- prune_taxa(!contamdf$contaminant, ps)
+ps <- subset_samples(ps, Organism != "blank sample")
+ps
+```
 
