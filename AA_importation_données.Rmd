@@ -75,4 +75,9 @@ dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
 ```{r}
 dadaFs[[1]]
 ```
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
 
