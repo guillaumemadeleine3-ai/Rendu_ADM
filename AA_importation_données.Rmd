@@ -157,18 +157,65 @@ samdf$is.neg <- samdf$Organism == "blank sample"
 ```
 
 ```{r}
-## 2. Correction des ASV en sens inverse (hypothèse à vérifier ci-dessous)
-taxa.rc <- assignTaxonomy(seqtab.nochim, silva, multithread = TRUE, tryRC = TRUE)
-is_rc   <- is.na(taxa[, "Phylum"]) & !is.na(taxa.rc[, "Phylum"])
-cat("ASV reclassées après retournement :", sum(is_rc), "\n")
-cat("Part des lectures concernées :",
-    round(100 * sum(seqtab.nochim[, is_rc]) / sum(seqtab.nochim), 1), "%\n")
+save.image("~/ADM_Données_articles/environnement_AA.RData")   # sauvegarde de sécurité
 
-seqtab.fix <- seqtab.nochim
-colnames(seqtab.fix)[is_rc] <- dada2::rc(colnames(seqtab.fix)[is_rc])
-seqtab.fix <- t(rowsum(t(seqtab.fix), group = colnames(seqtab.fix)))   # fusionne les doublons
-taxa.fix   <- assignTaxonomy(seqtab.fix, silva, multithread = TRUE, tryRC = TRUE)
-round(100 * colMeans(is.na(taxa.fix)), 1)    # % de NA par rang
+rm(dadaFs, dadaRs, mergers, errF, errR)
+gc()
+```
+
+
+```{r}
+# 2. Correction des ASV en sens inverse (hypothèse à vérifier ci-dessous)
+load("~/ADM_Données_articles/environnement_AA.RData")
+rm(list = intersect(c("dadaFs", "dadaRs", "mergers", "errF", "errR", "seqtab"), ls()))
+gc()
+library(dada2)
+silva <- "/home/rstudio/ADM_Données_articles/silva_nr99_v138.1_train_set.fa.gz"
+taxa  <- taxa[colnames(seqtab.nochim), , drop = FALSE]
+
+cand <- rownames(taxa)[is.na(taxa[, "Phylum"])]
+ab   <- sort(colSums(seqtab.nochim[, cand]), decreasing = TRUE)
+top  <- names(ab)[1:200]
+
+cat("Part des lectures couverte par ces 200 ASV :",
+    round(100 * sum(ab[1:200]) / sum(seqtab.nochim), 1), "%\n")
+
+t200 <- assignTaxonomy(dada2::rc(top), silva, multithread = 2)
+cat("ASV classées après retournement :", sum(!is.na(t200[, "Phylum"])), "sur 200\n")
+sort(table(t200[, "Phylum"], useNA = "ifany"), decreasing = TRUE)[1:5]
+```
+
+```{r}
+n <- min(2000, length(ab))
+top <- names(ab)[1:n]
+cat("Part des lectures couverte :", round(100 * sum(ab[1:n]) / sum(seqtab.nochim), 1), "%\n")
+
+top.rc  <- dada2::rc(top)
+taxa.rc <- assignTaxonomy(top.rc, silva, multithread = 2)
+rownames(taxa.rc) <- top.rc
+ok  <- !is.na(taxa.rc[, "Phylum"])
+sel <- top[ok]                    # séquences d'origine à retourner
+cat("ASV reclassées après retournement :", length(sel), "\n")
+
+keep <- seqtab.nochim[, !(colnames(seqtab.nochim) %in% sel), drop = FALSE]
+flip <- seqtab.nochim[,  colnames(seqtab.nochim) %in% sel,  drop = FALSE]
+colnames(flip) <- dada2::rc(colnames(flip))
+flip <- t(rowsum(t(flip), group = colnames(flip)))        # fusionne les doublons
+
+new_taxa <- taxa.rc[dada2::rc(sel), , drop = FALSE]
+new_taxa <- new_taxa[!duplicated(rownames(new_taxa)), , drop = FALSE]
+
+common <- intersect(colnames(flip), colnames(keep))
+if (length(common) > 0) keep[, common] <- keep[, common] + flip[, common]
+new <- setdiff(colnames(flip), colnames(keep))
+
+seqtab.fix <- cbind(keep, flip[, new, drop = FALSE])
+taxa.fix   <- rbind(taxa[colnames(keep), , drop = FALSE], new_taxa[new, , drop = FALSE])
+taxa.fix   <- taxa.fix[colnames(seqtab.fix), , drop = FALSE]
+
+stopifnot(identical(rownames(taxa.fix), colnames(seqtab.fix)))
+dim(seqtab.nochim); dim(seqtab.fix)
+round(100 * colMeans(is.na(taxa.fix)), 1)
 ```
 
 ```{r}
@@ -229,6 +276,9 @@ plot_ordination(ps.coral, ord.coral, color = "Treatment", shape = "Sampling_time
 adonis2(phyloseq::distance(ps.T3, "bray") ~ Treatment, data = data.frame(sample_data(ps.T3)))
 adonis2(phyloseq::distance(ps.T3, "jaccard", binary = TRUE) ~ Treatment,
         data = data.frame(sample_data(ps.T3)))
+ord.T3 <- ordinate(ps.T3, method = "PCoA", distance = "bray")
+plot_ordination(ps.T3, ord.T3, color = "Treatment", title = "Coraux à T3") +
+  stat_ellipse()
 ```
 
 ```{r}
@@ -245,7 +295,54 @@ for (t in c("T1", "T2", "T3", "T4")) {
 }
 
 top20 <- names(sort(taxa_sums(ps.coral), decreasing = TRUE))[1:20]
-plot_bar(prune_taxa(top20, ps.coral), x = "Sampling_time", fill = "Family") +
-  facet_wrap(~Treatment, scales = "free_x")
+df <- psmelt(prune_taxa(top20, ps.coral))
+df$Family[is.na(df$Family)] <- "non classé"
+s <- aggregate(Abundance ~ Sample + Treatment + Sampling_time + Family, data = df, sum)
+m <- aggregate(Abundance ~ Treatment + Sampling_time + Family, data = s, mean)
+
+ggplot(m, aes(Sampling_time, Abundance, fill = Family)) +
+  geom_col() + facet_wrap(~Treatment) + ylab("Abondance relative moyenne")
+```
+```{r}
+ps.fam <- tax_glom(ps.coral, taxrank = "Family", NArm = FALSE)
+topf   <- names(sort(taxa_sums(ps.fam), decreasing = TRUE))[1:8]
+df <- psmelt(prune_taxa(topf, ps.fam))
+df$Family[is.na(df$Family)] <- "non classé"
+m <- aggregate(Abundance ~ Treatment + Sampling_time + Family, data = df, mean)
+
+ggplot(m, aes(Sampling_time, Abundance, fill = Family)) +
+  geom_col() + facet_wrap(~Treatment) + ylab("Abondance relative moyenne")
+```
+```{r}
+bd <- betadisper(phyloseq::distance(ps.T3, "bray"), sample_data(ps.T3)$Treatment)
+permutest(bd)
 ```
 
+```{r}
+# Quel groupe est le plus dispersé ?
+bd <- betadisper(phyloseq::distance(ps.T3, "bray"), sample_data(ps.T3)$Treatment)
+tapply(bd$distances, sample_data(ps.T3)$Treatment, mean)
+plot(bd)
+
+# Même test pour Jaccard
+bdj <- betadisper(phyloseq::distance(ps.T3, "jaccard", binary = TRUE),
+                  sample_data(ps.T3)$Treatment)
+permutest(bdj)
+```
+```{r}
+d  <- phyloseq::distance(ps.T3, "bray")
+bd <- betadisper(d, sample_data(ps.T3)$Treatment)
+dist.c <- bd$distances
+sdT3 <- data.frame(sample_data(ps.T3))
+
+# On retire les 2 probiotiques les plus éloignés de leur centre
+extremes <- names(sort(dist.c[sdT3$Treatment == "Probiotic"], decreasing = TRUE))[1:2]
+keep <- !(rownames(sdT3) %in% extremes)
+
+ps.sens <- prune_samples(keep, ps.T3)
+adonis2(phyloseq::distance(ps.sens, "bray") ~ Treatment,
+        data = data.frame(sample_data(ps.sens)))
+permutest(betadisper(phyloseq::distance(ps.sens, "bray"),
+                     sample_data(ps.sens)$Treatment))
+```
+DONC à T3, les coraux traités par probiotiques présentaient une diversité de Shannon plus élevée que les placebo (Wilcoxon, p = 0,0009) et une abondance relative d’Endozoicomonadaceae différente (p = 0,0068), sans différence aux autres temps (p > 0,2). La composition du microbiome différait entre traitements à T3 (PERMANOVA, Bray-Curtis : R² = 0,131, p = 0,005 ; Jaccard : R² = 0,130, p = 0,001). La dispersion multivariée différait cependant entre groupes (permutest : Bray-Curtis p = 0,019 ; Jaccard p = 0,034), les coraux traités étant plus hétérogènes que les placebo (distance moyenne au centroïde : 0,29 contre 0,15, Bray-Curtis). Dans une analyse de sensibilité exploratoire excluant les deux coraux probiotiques les plus éloignés de leur centroïde, la différence de composition restait significative (R² = 0,121, p = 0,012) et la différence de dispersion n’atteignait plus le seuil de 0,05 (p = 0,055). La différence de composition observée reflète donc probablement à la fois un décalage de composition et une hétérogénéité plus grande des coraux traités. Ces résultats vont dans le sens de ceux de l’étude originale (R² = 0,137, p = 0,002, Bray-Curtis).
