@@ -1,5 +1,6 @@
 ---
-title: "R Notebook"
+title: "Analyse d'article"
+article: Probiotics reshape the coral microbiome in situ without detectable off-target effects in the surrounding environment
 output: github_document
 ---
 ## ls (list show) : savoir ce qu'on a dans le fichier 
@@ -93,6 +94,7 @@ table(nchar(getSequences(seqtab)))
 seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
 dim(seqtab.nochim)
 ```
+
 ```{r}
 sum(seqtab.nochim)/sum(seqtab)
 ```
