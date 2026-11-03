@@ -1,0 +1,509 @@
+---
+title: "Analyse d'article"
+author: Madeleine GUILLAUME
+output: github_document
+---
+### **Probiotics reshape the coral microbiome in situ without detectable off-target effects in the surrounding environment**
+
+# Importation des données de l’étude
+
+On importe la table de métadonnées de l’étude (projet PRJEB65896), qui décrit chaque échantillon : organisme (corail, sédiment, eau ou blanc), temps de prélèvement (T1 à T4) et traitement. Elle servira plus tard à relier les séquences aux conditions expérimentales.
+
+```{r}
+meta_data_table <- read.csv("SraRunTable.csv", sep = ",", header = TRUE)
+  # importation de la table de métadonnée 
+```
+
+On charge dada2 et on indique le dossier contenant les séquences téléchargées depuis l’ENA. Contrairement au jeu de test, ces données viennent d’une vraie étude sur le microbiote de coraux traités avec un probiotique.
+
+```{r}
+library(dada2); packageVersion("dada2")
+```
+
+```{r}
+path <- "/home/rstudio/ADM_Données_articles/data_article" 
+list.files(path)
+```
+
+On charge les packages pour manipuler les données de microbiome (phyloseq), les séquences (Biostrings) et faire les graphiques (ggplot2). On charge également tous les packages utiles, dont decontam (détection des contaminants) et vegan (statistiques de communautés). 
+
+```{r}
+load("~/ADM_Données_articles/environnement_AA.RData")
+library(phyloseq); library(Biostrings); library(ggplot2)
+library(decontam); library(vegan)
+theme_set(theme_bw())
+```
+
+# Pipeline DADA2
+
+On sépare les lectures forward (_1) et reverse (_2), triées dans le même ordre pour que chaque paire corresponde. Les noms d’échantillons sont extraits des noms de fichiers. Les motifs de nom sont différents de ceux du jeu de test et ont donc dû être adaptés à nos fichiers.
+
+```{r}
+
+fnFs <- sort(list.files(path, pattern="_1.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_2.fastq", full.names = TRUE))
+
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+```
+
+On regarde la qualité des lectures forward puis reverse sur deux échantillons. Cela permet de voir à partir de quelle position la qualité chute et de choisir où couper.
+
+```{r}
+plotQualityProfile(fnFs[1:2])
+#visualiser les profils de qualité des lectures
+```
+
+```{r}
+plotQualityProfile(fnRs[1:2])
+#visualiser les profils de qualité des lectures inversées
+```
+
+Les profils de qualité des deux premiers échantillons montrent une qualité médiane élevée (entre 33 et 37) sur toute la longueur des lectures, en forward comme en reverse. Il n'y a pas de chute progressive en fin de lecture. Seuls quelques cycles isolés présentent une baisse brutale, que le filtrage par erreurs attendues élimine. Les lectures sont donc de bonne qualité. Le choix de l'emplacement du tronquage dépend surtout du chevauchement nécessaire entre forward et reverse pour la région V3-V4.
+
+On prépare ensuite, hles noms des futurs fichiers filtrés, un par échantillon et par sens de lecture.
+
+```{r}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+On nettoie les lectures : on coupe les extrémités de mauvaise qualité et on élimine les séquences ambiguës, trop sujettes aux erreurs ou issues du PhiX. La longueur de troncature est adaptée à nos données : la région séquencée (V3-V4 du gène 16S) est plus longue que celle du jeu de test, donc les lectures forward et reverse doivent encore se chevaucher après la coupe pour pouvoir être fusionnées.
+
+PS : Les étapes de calcul lourd (filtrage, débruitage, chimères, taxonomie) ne sont pas réexécutées lors du knit : leurs résultats ont été sauvegardés au préalable.
+
+```{r, eval=FALSE}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(220,220),
+              maxN=0,maxEE=c(2,2),truncQ=2,rm.phix=TRUE,
+              compress=TRUE,multithread=FALSE) 
+```
+
+```{r}
+head(out)
+```
+
+On apprend le taux d’erreur de séquençage propre à nos données, séparément pour les lectures forward et reverse, puis on vérifie graphiquement que le modèle suit bien les erreurs observées.
+
+```{r, eval=FALSE}
+errF <- learnErrors(filtFs, multithread=TRUE)
+```
+
+```{r, eval=FALSE}
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+```
+
+On débruite les lectures : DADA2 corrige les erreurs de séquençage et ne garde que les vraies séquences biologiques (ASV). On affiche le résultat du premier échantillon pour voir combien de séquences uniques de départ se réduisent à de vraies ASV.
+
+```{r, eval=FALSE}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+```
+
+```{r, eval=FALSE}
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+```{r}
+dadaFs[[1]]
+```
+
+On fusionne chaque lecture forward avec sa reverse grâce à leur zone de chevauchement, pour reconstituer la séquence complète de la région amplifiée.
+
+```{r, eval=FALSE}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+```
+```{r}
+head(mergers[[1]])
+```
+
+Le modèle d'erreur est appris sur environ 126 millions de bases (572 198 lectures issues de 4 échantillons), ce qui est largement suffisant. Sur le graphique, le taux d'erreur diminue quand la qualité augmente, comme attendu. La courbe noire (modèle) suit globalement les points observés. Les avertissements affichés viennent de l'échelle logarithmique et sont sans gravité. Les cadres vides correspondent à des substitutions impossibles (par exemple A vers A). Le modèle est donc valide pour le débruitage.
+
+On construit la *table d’ASV* (échantillons en lignes, ASV en colonnes, nombre de lectures en valeurs). On vérifie ensuite que les longueurs des séquences correspondent à celles attendues pour la région V3-V4.
+
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+
+```{r}
+table(nchar(getSequences(seqtab)))
+```
+
+On retire les séquences chimériques, c’est-à-dire des séquences artificielles formées pendant la PCR par le recollage de deux séquences différentes. On vérifie aussi quelle part des lectures est conservée : une valeur proche de 1 indique que ces chimères représentent peu de lectures.
+
+```{r, eval=FALSE}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+```
+```{r}
+dim(seqtab.nochim)
+```
+
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+Le débruitage porte sur 156 échantillons. Pour le premier, DADA2 passe de 38 431 séquences uniques à 713 variants réels. La grande majorité des séquences uniques étaient donc des erreurs de séquençage. Le nombre de séquences uniques varie beaucoup selon les échantillons, de 10 000 à plus de 100 000. Certains échantillons sont donc nettement plus bruités ou plus diversifiés. La fusion des lectures forward et reverse reconstitue la séquence complète de la région amplifiée.
+
+Après fusion, la table contient 156 échantillons et 329 450 ASV. La majorité des séquences font 427 pb, ce qui correspond à la région V3-V4 attendue. On observe aussi des pics secondaires vers 402-405 pb et 422 pb, probablement dus à d'autres groupes bactériens ou à des séquences d'organites. Les séquences très courtes (moins de 300 pb) sont rares.
+
+Après retrait des chimères, il reste 108 818 ASV, soit environ deux tiers de moins. Ces chimères ne représentent pourtant que 13 % des lectures, car 86,9 % sont conservées. Ce sont donc surtout des variants rares.
+
+On suit le nombre de lectures conservées à chaque étape du pipeline, pour repérer une étape où l’on perd trop de données.
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+Le tableau de suivi montre le nombre de lectures conservées à chaque étape. Le filtrage retire 10 à 20 % des lectures. Le débruitage, la fusion et le retrait des chimères en retirent encore un peu. La part de lectures conservées jusqu'à la table finale est de 72,8 % en médiane (de 44,3 % à 84,1 %). C'est une perte acceptable, avec quelques échantillons plus touchés, comme le deuxième (environ 57 %).
+
+# Assignation taxonomique
+
+On attribue à chaque ASV un nom de bactérie (du règne au genre) en le comparant à la base de référence SILVA. Les premières ASV, les plus abondantes, sont assignées à la famille des Endozoicomonadaceae (genre Endozoicomonas), au sein des Gammaproteobacteria. Ce sont des bactéries typiques du microbiote des coraux, ce qui est cohérent avec les échantillons. Une ASV reste sans classification dès le phylum. Les noms d'échantillons (ERR12023394 à ERR12023555) correspondent bien à la table de métadonnées.
+
+```{r, eval=FALSE}
+taxa <- assignTaxonomy(seqtab.nochim,
+                       "/home/rstudio/ADM_Données_articles/silva_nr99_v138.1_train_set.fa.gz",
+                       multithread = TRUE)
+```
+
+On vérifie les noms d’échantillons présents dans la table, puis on résume le pourcentage de lectures qui traversent tout le pipeline jusqu’à la table finale. Cela permet de juger si la perte globale est acceptable.
+
+```{r}
+taxa.print <- taxa
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+
+```{r}
+rownames(seqtab.nochim)
+```
+
+```{r}
+summary(round(100 * track[, "nonchim"] / track[, "input"], 1))
+```
+
+# Préparation des données pour l’analyse
+
+On aligne la table de métadonnées sur la table d'ASV, en retrouvant la colonne qui contient les bons identifiants d'échantillons, et on vérifie que l'ordre est identique. On crée aussi deux variables :
+
+  • le traitement (probiotique ou placebo, d'après le nom de l'échantillon)
+  • l'indicateur des blancs négatifs
+
+Ces deux variables serviront notamment à repérer les contaminations.
+
+```{r}
+silva <- "/home/rstudio/ADM_Données_articles/silva_nr99_v138.1_train_set.fa.gz"
+
+id_col <- names(which.max(sapply(meta_data_table,
+                function(x) sum(rownames(seqtab.nochim) %in% x))))
+samdf <- as.data.frame(meta_data_table)
+samdf <- samdf[samdf[[id_col]] %in% rownames(seqtab.nochim), ]
+rownames(samdf) <- samdf[[id_col]]
+samdf <- samdf[rownames(seqtab.nochim), , drop = FALSE]
+stopifnot(all(rownames(samdf) == rownames(seqtab.nochim)))
+
+samdf$Treatment <- ifelse(grepl("BMC", samdf$Sample_name), "Probiotic",
+                   ifelse(grepl("CTRL", samdf$Sample_name), "Placebo", NA))
+samdf$is.neg <- samdf$Organism == "blank sample"
+```
+
+On sauvegarde l'environnement par sécurité, puis on supprime les gros objets devenus inutiles pour libérer de la mémoire et faciliter l'enregistrement.
+
+```{r, eval=FALSE}
+save.image("~/ADM_Données_articles/environnement_AA.RData")   
+
+rm(dadaFs, dadaRs, mergers, errF, errR)
+gc()
+```
+
+# Correction des séquences en sens inverse
+
+Un grand nombre d’ASV n’étaient pas classées par la base SILVA. Notre hypothèse est que certaines séquences sont orientées en sens inverse. On teste donc l’assignation après les avoir retournées, d’abord sur les 200 ASV non classées les plus abondantes, puis sur un plus grand nombre.
+
+Les 200 ASV non classées les plus abondantes représentent 29,1 % des lectures. Après retournement, 199 sur 200 sont classées, surtout en Proteobacteria (101), Firmicutes (30) et Cyanobacteria (24). L’hypothèse d’une orientation inversée est donc confirmée. La correction est ensuite appliquée aux 2 000 ASV non classées les plus abondantes (32,3 % des lectures) : 1 992 sont reclassées. Les séquences retournées sont réintégrées dans la table d’ASV et dans la taxonomie.
+
+```{r, eval=FALSE}
+load("~/ADM_Données_articles/environnement_AA.RData")
+rm(list = intersect(c("dadaFs", "dadaRs", "mergers", "errF", "errR", "seqtab"), ls()))
+gc()
+library(dada2)
+silva <- "/home/rstudio/ADM_Données_articles/silva_nr99_v138.1_train_set.fa.gz"
+taxa  <- taxa[colnames(seqtab.nochim), , drop = FALSE]
+
+cand <- rownames(taxa)[is.na(taxa[, "Phylum"])]
+ab   <- sort(colSums(seqtab.nochim[, cand]), decreasing = TRUE)
+top  <- names(ab)[1:200]
+
+cat("Part des lectures couverte par ces 200 ASV :",
+    round(100 * sum(ab[1:200]) / sum(seqtab.nochim), 1), "%\n")
+
+t200 <- assignTaxonomy(dada2::rc(top), silva, multithread = 2)
+cat("ASV classées après retournement :", sum(!is.na(t200[, "Phylum"])), "sur 200\n")
+sort(table(t200[, "Phylum"], useNA = "ifany"), decreasing = TRUE)[1:5]
+```
+
+```{r, eval=FALSE}
+n <- min(2000, length(ab))
+top <- names(ab)[1:n]
+cat("Part des lectures couverte :", round(100 * sum(ab[1:n]) / sum(seqtab.nochim), 1), "%\n")
+
+top.rc  <- dada2::rc(top)
+taxa.rc <- assignTaxonomy(top.rc, silva, multithread = 2)
+rownames(taxa.rc) <- top.rc
+ok  <- !is.na(taxa.rc[, "Phylum"])
+sel <- top[ok]                    
+cat("ASV reclassées après retournement :", length(sel), "\n")
+
+keep <- seqtab.nochim[, !(colnames(seqtab.nochim) %in% sel), drop = FALSE]
+flip <- seqtab.nochim[,  colnames(seqtab.nochim) %in% sel,  drop = FALSE]
+colnames(flip) <- dada2::rc(colnames(flip))
+flip <- t(rowsum(t(flip), group = colnames(flip)))        # fusionne les doublons
+
+new_taxa <- taxa.rc[dada2::rc(sel), , drop = FALSE]
+new_taxa <- new_taxa[!duplicated(rownames(new_taxa)), , drop = FALSE]
+
+common <- intersect(colnames(flip), colnames(keep))
+if (length(common) > 0) keep[, common] <- keep[, common] + flip[, common]
+new <- setdiff(colnames(flip), colnames(keep))
+
+seqtab.fix <- cbind(keep, flip[, new, drop = FALSE])
+taxa.fix   <- rbind(taxa[colnames(keep), , drop = FALSE], new_taxa[new, , drop = FALSE])
+taxa.fix   <- taxa.fix[colnames(seqtab.fix), , drop = FALSE]
+
+stopifnot(identical(rownames(taxa.fix), colnames(seqtab.fix)))
+dim(seqtab.nochim); dim(seqtab.fix)
+round(100 * colMeans(is.na(taxa.fix)), 1)
+```
+```{r}
+dim(seqtab.nochim); dim(seqtab.fix)
+```
+Le nombre d’échantillons reste identique (156) et aucune lecture n’est perdue, car les comptages des ASV retournées sont additionnés. Le nombre d’ASV passe de 108 818 à 106 900. Sur les 1 992 ASV retournées, 1 918 correspondaient en réalité à une séquence déjà présente dans le bon sens : elles ont été fusionnées avec leur équivalent, et seules 74 sont de nouvelles ASV. Une partie de la diversité apparente venait donc d’une même séquence comptée deux fois, dans les deux orientations.
+
+```{r}
+round(100 * colMeans(is.na(taxa.fix)), 1)
+```
+
+La part d’ASV non classées augmente à chaque rang taxonomique : 8,5 % au règne, 44 % au phylum, 48,4 % à la classe, 55,2 % à l’ordre, 64 % à la famille et 79 % au genre. Le règne est presque toujours connu, mais près de la moitié des ASV restent sans phylum, surtout des ASV rares qui n’ont pas été traitées par la correction. Ce taux de séquences non classées est fréquent pour des communautés marines, mal représentées dans les bases de référence.
+
+# Construction de l’objet phyloseq et nettoyage
+
+On regroupe la table d'ASV, les métadonnées et la taxonomie dans un seul objet. On retire ensuite ce qui ne correspond pas au microbiote du corail : les séquences de chloroplastes et de mitochondries, qui viennent de l'hôte ou des algues. On renomme les ASV pour plus de lisibilité.
+
+On identifie enfin les contaminants grâce aux blancs négatifs (échantillons sans matériel biologique). L'analyse en trouve 903 sur 103 891 ASV, soit moins de 1 %. Ils sont supprimés, ainsi que les blancs eux-mêmes et les ASV devenues absentes.
+
+L'objet final contient 97 914 ASV et 149 échantillons :
+
+  - 114 coraux (58 placebo, 56 probiotique) 
+
+  - 16 sédiments (7 placebo, 9 probiotique) 
+
+  - 19 échantillons d'eau (10 placebo, 9 probiotique)
+
+Les groupes sont équilibrés entre traitements.
+
+```{r, eval=FALSE}
+ps <- phyloseq(otu_table(seqtab.fix, taxa_are_rows = FALSE),
+               sample_data(samdf), tax_table(taxa.fix))
+
+ps <- subset_taxa(ps, is.na(Order)  | Order  != "Chloroplast")
+ps <- subset_taxa(ps, is.na(Family) | Family != "Mitochondria")
+
+dna <- DNAStringSet(taxa_names(ps)); names(dna) <- taxa_names(ps)
+ps  <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+
+# Contaminants (blancs négatifs), puis retrait des blancs
+contamdf <- isContaminant(ps, method = "prevalence", neg = "is.neg")
+table(contamdf$contaminant)
+ps <- prune_taxa(!contamdf$contaminant, ps)
+ps <- subset_samples(ps, Organism != "blank sample")
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
+ps
+table(sample_data(ps)$Organism, sample_data(ps)$Treatment, useNA = "ifany")
+```
+
+```{r}
+table(contamdf$contaminant)
+ps
+table(sample_data(ps)$Organism, sample_data(ps)$Treatment, useNA = "ifany")
+```
+
+On prépare les différentes versions de l'objet selon l'analyse :
+
+  - comptages bruts des coraux pour la diversité alpha 
+
+  - version filtrée (ASV présentes dans au moins 3 échantillons), transformée en abondances relatives, pour les comparaisons de composition 
+
+  - sous-ensemble des coraux à T3, le temps où l'effet du traitement est étudié
+
+```{r}
+ps.coral.raw <- subset_samples(ps, Organism == "coral metagenome")      
+ps.filt <- filter_taxa(ps, function(x) sum(x > 0) >= 3, TRUE)          
+ps.prop <- transform_sample_counts(ps.filt, function(x) x / sum(x))
+ps.coral <- subset_samples(ps.prop, Organism == "coral metagenome")
+ps.T3    <- subset_samples(ps.coral, Sampling_time == "T3")
+```
+
+# Diversité alpha
+
+On compare la diversité au sein de chaque échantillon (indices de Shannon et Simpson). Pour les coraux, on compare ensuite probiotique et placebo à chaque temps avec un test de Wilcoxon, adapté aux petits effectifs et aux données non normales.
+
+Sur le premier graphique, les trois types d'échantillons se distinguent nettement. Les sédiments ont la diversité de Shannon la plus élevée (environ 7,5 à 8). L'eau de mer est intermédiaire (environ 4 à 5,5). Les coraux sont les moins divers (environ 2 à 4), ce qui est cohérent avec un microbiote dominé par quelques taxons, comme Endozoicomonas. L'indice de Simpson, proche de 1 pour tous les groupes, sature et distingue moins bien les échantillons.
+
+Pour les coraux seuls, la diversité de Shannon ne diffère pas entre probiotique et placebo à T1 (p = 0,73), T2 (p = 0,62) et T4 (p = 0,65). À T3, elle est significativement plus élevée chez les coraux traités (p = 0,0009). Ce résultat reste significatif après correction pour les 4 comparaisons (seuil de 0,0125). Sur le graphique, il vient surtout de quelques coraux traités très divers (valeurs de 4 à plus de 6), alors que la majorité des points des deux groupes restent entre 2 et 3,5. L'effet est donc ponctuel (T3 uniquement) et porté par une partie des coraux traités.
+
+```{r}
+plot_richness(ps, x = "Sampling_time", measures = c("Shannon", "Simpson"), color = "Organism")
+plot_richness(ps.coral.raw, x = "Sampling_time", measures = "Shannon", color = "Treatment")
+
+alpha <- estimate_richness(ps.coral.raw, measures = "Shannon")
+alpha$Treatment     <- sample_data(ps.coral.raw)$Treatment
+alpha$Sampling_time <- sample_data(ps.coral.raw)$Sampling_time
+for (t in c("T1", "T2", "T3", "T4")) {
+  a <- subset(alpha, Sampling_time == t)
+  cat(t, ": p =", signif(wilcox.test(Shannon ~ Treatment, data = a)$p.value, 3), "\n")
+}
+
+```
+
+# Diversité bêta
+
+On compare la composition des communautés entre échantillons avec la distance de Bray-Curtis (qui tient compte des abondances) et celle de Jaccard (présence/absence). Les résultats sont projetés en 2D par PCoA. À T3, un test PERMANOVA vérifie si la composition diffère entre probiotique et placebo.
+
+La PCoA de tous les échantillons montre trois groupes bien séparés : coraux, sédiments et eau de mer. Les deux premiers axes expliquent 48,2 % et 18,8 % de la variation. L'organisme est donc le facteur principal de structuration des communautés, bien avant le traitement ou le temps. Les coraux forment un groupe étiré, avec une majorité d'échantillons très proches et quelques échantillons plus éloignés.
+
+Sur les coraux seuls, probiotiques et placebo se mélangent largement, sans séparation nette selon le traitement ni selon le temps.
+
+À T3, les ellipses se chevauchent mais n'ont pas la même taille. Les placebo forment un groupe compact. Les coraux traités sont beaucoup plus dispersés et leur ellipse englobe celle des placebo. Le test confirme une différence : le traitement explique environ 13 % de la variation de composition (29 échantillons), avec Bray-Curtis (R² = 0,131 ; p = 0,005) et avec Jaccard (R² = 0,130 ; p = 0,001). L'effet est modéré mais significatif, et il concerne à la fois les abondances et la présence/absence des ASV.
+
+```{r}
+ord.all <- ordinate(ps.prop, method = "PCoA", distance = "bray")
+plot_ordination(ps.prop, ord.all, color = "Organism", shape = "Sampling_time")
+
+ord.coral <- ordinate(ps.coral, method = "PCoA", distance = "bray")
+plot_ordination(ps.coral, ord.coral, color = "Treatment", shape = "Sampling_time")
+
+# PERMANOVA à T3 : Bray-Curtis et Jaccard
+adonis2(phyloseq::distance(ps.T3, "bray") ~ Treatment, data = data.frame(sample_data(ps.T3)))
+adonis2(phyloseq::distance(ps.T3, "jaccard", binary = TRUE) ~ Treatment,
+        data = data.frame(sample_data(ps.T3)))
+ord.T3 <- ordinate(ps.T3, method = "PCoA", distance = "bray")
+plot_ordination(ps.T3, ord.T3, color = "Treatment", title = "Coraux à T3") +
+  stat_ellipse()
+```
+
+# Composition taxonomique
+
+On s’intéresse à la famille Endozoicomonadaceae, bactéries typiquement associées aux coraux sains, et on compare son abondance entre traitements à chaque temps. On représente aussi les 20 ASV les plus abondantes, regroupées par famille. Les ASV hors du top 20 sont regroupées dans la catégorie « Autres », afin que chaque barre représente 100 % de la communauté.
+
+Les Endozoicomonadaceae dominent le microbiote des coraux : elles représentent environ 70 à 85 % de l'abondance relative selon les groupes et les temps. Les autres familles (Burkholderiaceae, Simkaniaceae, Phycisphaeraceae, Oxalobacteraceae, Rhodobacteraceae) et la catégorie « Autres » restent minoritaires. 
+
+Le boxplot montre que leur abondance est plus faible chez les coraux traités à T3 : la médiane est d'environ 0,68, contre environ 0,89 chez les placebo, avec une grande variabilité chez les traités. La différence est significative à T3 (p = 0,0068) et pas aux autres temps (p de 0,29 à 0,72). Le probiotique est donc associé à une baisse transitoire de cette famille dominante, à T3.
+
+Cette baisse s'accompagne d'une augmentation de la diversité : quand une famille dominante recule, les autres familles pèsent davantage, ce qui augmente l'indice de Shannon. Les barplots le suggèrent aussi, avec une part plus importante de Burkholderiaceae et de Simkaniaceae chez les traités à certains temps.
+
+```{r}
+tax  <- as(tax_table(ps.coral), "matrix")
+endo <- rownames(tax)[tax[, "Family"] %in% "Endozoicomonadaceae"]
+sample_data(ps.coral)$Endozoicomonadaceae <- sample_sums(prune_taxa(endo, ps.coral))
+sdc <- data.frame(sample_data(ps.coral))
+
+ggplot(sdc, aes(Sampling_time, Endozoicomonadaceae, fill = Treatment)) + geom_boxplot()
+for (t in c("T1", "T2", "T3", "T4")) {
+  a <- subset(sdc, Sampling_time == t)
+  cat(t, ": p =", signif(wilcox.test(Endozoicomonadaceae ~ Treatment, data = a)$p.value, 3), "\n")
+}
+
+top20 <- names(sort(taxa_sums(ps.coral), decreasing = TRUE))[1:20]
+df <- psmelt(ps.coral)
+df$Family <- as.character(df$Family)
+df$Family[is.na(df$Family)] <- "non classé"
+df$Family[!(df$OTU %in% top20)] <- "Autres"
+
+s <- aggregate(Abundance ~ Sample + Treatment + Sampling_time + Family, data = df, sum)
+m <- aggregate(Abundance ~ Treatment + Sampling_time + Family, data = s, mean)
+
+ggplot(m, aes(Sampling_time, Abundance, fill = Family)) +
+  geom_col() + facet_wrap(~Treatment) + ylab("Abondance relative moyenne")
+```
+
+On refait la même représentation en regroupant d’abord les ASV par famille et en gardant les 8 familles principales. Les autres familles sont regroupées dans la catégorie « Autres », afin que chaque barre atteigne 1. Le graphique est plus lisible, puisque le résultat ne dépend plus du découpage en ASV.
+
+```{r}
+ps.fam <- tax_glom(ps.coral, taxrank = "Family", NArm = FALSE)
+topf   <- names(sort(taxa_sums(ps.fam), decreasing = TRUE))[1:8]
+
+df <- psmelt(ps.fam)                                  
+df$Family <- as.character(df$Family)
+df$Family[is.na(df$Family)] <- "non classé"
+df$Family[!(df$OTU %in% topf)] <- "Autres"             
+
+s <- aggregate(Abundance ~ Sample + Treatment + Sampling_time + Family, data = df, sum)
+m <- aggregate(Abundance ~ Treatment + Sampling_time + Family, data = s, mean)
+
+ggplot(m, aes(Sampling_time, Abundance, fill = Family)) +
+  geom_col() + facet_wrap(~Treatment) + ylab("Abondance relative moyenne")
+```
+
+# Vérification de la dispersion
+
+La PERMANOVA suppose une dispersion comparable entre groupes. On teste donc l'homogénéité des dispersions, puis on regarde quel groupe est le plus hétérogène. On refait le test avec Jaccard.
+
+Les dispersions diffèrent entre groupes (Bray-Curtis : p = 0,019 ; Jaccard : p = 0,034). Sur le graphique, les coraux placebo forment un petit polygone compact, alors que les coraux traités couvrent un espace beaucoup plus large. La distance moyenne au centre du groupe est de 0,29 contre 0,15. Le résultat de la PERMANOVA doit donc être nuancé, car il peut refléter une différence de dispersion et pas seulement de composition.
+
+```{r}
+bd <- betadisper(phyloseq::distance(ps.T3, "bray"), sample_data(ps.T3)$Treatment)
+permutest(bd)
+```
+
+```{r}
+# Quel groupe est le plus dispersé ?
+bd <- betadisper(phyloseq::distance(ps.T3, "bray"), sample_data(ps.T3)$Treatment)
+tapply(bd$distances, sample_data(ps.T3)$Treatment, mean)
+plot(bd)
+
+# Même test avec Jaccard
+bdj <- betadisper(phyloseq::distance(ps.T3, "jaccard", binary = TRUE),
+                  sample_data(ps.T3)$Treatment)
+permutest(bdj)
+```
+
+# Analyse de sensibilité
+
+Comme la dispersion diffère entre groupes, on vérifie que le résultat ne dépend pas de quelques échantillons extrêmes. On retire les deux coraux probiotiques les plus éloignés de leur centre (27 échantillons restants), puis on refait la PERMANOVA et le test de dispersion.
+
+La différence de composition reste significative (R² = 0,121 ; p = 0,012). La différence de dispersion n'est plus significative (p = 0,055). L'effet sur la composition ne dépend donc pas de ces deux échantillons extrêmes. Cette analyse reste exploratoire.
+
+```{r}
+d  <- phyloseq::distance(ps.T3, "bray")
+bd <- betadisper(d, sample_data(ps.T3)$Treatment)
+dist.c <- bd$distances
+sdT3 <- data.frame(sample_data(ps.T3))
+
+# On retire les 2 probiotiques les plus éloignés de leur centre
+extremes <- names(sort(dist.c[sdT3$Treatment == "Probiotic"], decreasing = TRUE))[1:2]
+keep <- !(rownames(sdT3) %in% extremes)
+
+ps.sens <- prune_samples(keep, ps.T3)
+adonis2(phyloseq::distance(ps.sens, "bray") ~ Treatment,
+        data = data.frame(sample_data(ps.sens)))
+permutest(betadisper(phyloseq::distance(ps.sens, "bray"),
+                     sample_data(ps.sens)$Treatment))
+```
+
+# Conclusion
+À T3, les coraux traités par probiotique présentent une diversité de Shannon plus élevée que les placebo (Wilcoxon, p = 0,0009) et une abondance plus faible d'Endozoicomonadaceae (p = 0,0068). Ces différences n'apparaissent pas aux autres temps (p > 0,2).
+
+La composition du microbiome diffère entre traitements à T3 (PERMANOVA, Bray-Curtis : R² = 0,131, p = 0,005 ; Jaccard : R² = 0,130, p = 0,001). La dispersion multivariée diffère cependant entre groupes (Bray-Curtis : p = 0,019 ; Jaccard : p = 0,034), les coraux traités étant plus hétérogènes que les placebo (distance moyenne au centre : 0,29 contre 0,15).
+
+Dans l'analyse de sensibilité exploratoire, qui exclut les deux coraux probiotiques les plus éloignés de leur centre, la différence de composition reste significative (R² = 0,121 ; p = 0,012) et la différence de dispersion n'atteint plus le seuil de 0,05 (p = 0,055). La différence observée reflète donc probablement à la fois un décalage de composition et une hétérogénéité plus grande des coraux traités.
+
+Ces résultats vont dans le sens de ceux de l'étude originale (R² = 0,137 ; p = 0,002 ; Bray-Curtis).
